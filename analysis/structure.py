@@ -1,9 +1,6 @@
+
 import sys
 from pathlib import Path
-
-# ============================================================
-# PROJECT ROOT
-# ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -14,210 +11,176 @@ import pandas as pd
 
 
 # ============================================================
-# 1. SWING HIGH / SWING LOW
+# SWING DETECTION
 # ============================================================
 
 def detect_swings(df, left=3, right=3):
     """
-    Swing High va Swing Low ni aniqlaydi.
+    Detect confirmed swing highs and swing lows.
 
-    Swing faqat right candle o'tgandan keyin tasdiqlanadi.
-    Shu sababli real-time tahlilda kelajak ma'lumotidan
-    noto'g'ri foydalanish kamayadi.
-
-    swing_high:
-        True -> Swing High
-
-    swing_low:
-        True -> Swing Low
-
-    swing_confirmed_at:
-        Ushbu swing qaysi candle'da tasdiqlanganini bildiradi.
+    A swing is confirmed only after `right` candles have formed.
     """
 
-    df = df.copy()
+    data = df.copy()
 
-    df["swing_high"] = False
-    df["swing_low"] = False
+    data["swing_high"] = False
+    data["swing_low"] = False
+    data["swing_confirmation_index"] = None
 
-    df["swing_high_confirmed_at"] = None
-    df["swing_low_confirmed_at"] = None
+    highs = data["high"].values
+    lows = data["low"].values
 
-    for i in range(left, len(df) - right):
+    for i in range(left, len(data) - right):
 
-        current_high = float(df.iloc[i]["high"])
-        current_low = float(df.iloc[i]["low"])
+        current_high = highs[i]
+        current_low = lows[i]
 
-        left_highs = df.iloc[i - left:i]["high"]
-        right_highs = df.iloc[i + 1:i + right + 1]["high"]
+        left_highs = highs[i - left:i]
+        right_highs = highs[i + 1:i + right + 1]
 
-        left_lows = df.iloc[i - left:i]["low"]
-        right_lows = df.iloc[i + 1:i + right + 1]["low"]
+        left_lows = lows[i - left:i]
+        right_lows = lows[i + 1:i + right + 1]
 
-        # ----------------------------------------------------
-        # SWING HIGH
-        # ----------------------------------------------------
+        is_high = (
+            current_high >= max(left_highs)
+            and current_high >= max(right_highs)
+        )
 
-        if (
-            current_high > left_highs.max()
-            and current_high > right_highs.max()
-        ):
+        is_low = (
+            current_low <= min(left_lows)
+            and current_low <= min(right_lows)
+        )
 
-            df.loc[df.index[i], "swing_high"] = True
+        # Prevent one candle from becoming both HIGH and LOW.
+        if is_high and is_low:
 
-            confirmation_index = i + right
+            high_strength = (
+                current_high - max(left_highs)
+            ) + (
+                current_high - max(right_highs)
+            )
 
-            df.loc[
-                df.index[i],
-                "swing_high_confirmed_at"
+            low_strength = (
+                min(left_lows) - current_low
+            ) + (
+                min(right_lows) - current_low
+            )
+
+            if high_strength >= low_strength:
+                is_low = False
+            else:
+                is_high = False
+
+        confirmation_index = i + right
+
+        if is_high:
+            data.iloc[i, data.columns.get_loc("swing_high")] = True
+            data.iloc[
+                i,
+                data.columns.get_loc("swing_confirmation_index")
             ] = confirmation_index
 
-        # ----------------------------------------------------
-        # SWING LOW
-        # ----------------------------------------------------
-
-        if (
-            current_low < left_lows.min()
-            and current_low < right_lows.min()
-        ):
-
-            df.loc[df.index[i], "swing_low"] = True
-
-            confirmation_index = i + right
-
-            df.loc[
-                df.index[i],
-                "swing_low_confirmed_at"
+        elif is_low:
+            data.iloc[i, data.columns.get_loc("swing_low")] = True
+            data.iloc[
+                i,
+                data.columns.get_loc("swing_confirmation_index")
             ] = confirmation_index
 
-    return df
+    return data
 
 
 # ============================================================
-# 2. SWING POINTLAR
+# STRUCTURE POINTS
 # ============================================================
 
 def get_swing_points(df):
     """
-    Tasdiqlangan barcha swing nuqtalarni qaytaradi.
-
-    Har bir point:
-
-        index
-        confirmation_index
-        time
-        type
-        price
+    Convert swing candles into structure points.
     """
 
     points = []
 
-    for index, row in df.iterrows():
+    for i, row in df.iterrows():
 
-        if row["swing_high"]:
-
-            confirmation_index = row[
-                "swing_high_confirmed_at"
-            ]
+        if row.get("swing_high", False):
 
             points.append({
-                "index": int(index),
-                "confirmation_index": int(confirmation_index),
-                "time": row["openTime"],
+                "index": i,
+                "time": row.name,
                 "type": "HIGH",
-                "price": float(row["high"])
+                "price": float(row["high"]),
+                "confirmation_index": row.get(
+                    "swing_confirmation_index"
+                ),
             })
 
-        if row["swing_low"]:
-
-            confirmation_index = row[
-                "swing_low_confirmed_at"
-            ]
+        elif row.get("swing_low", False):
 
             points.append({
-                "index": int(index),
-                "confirmation_index": int(confirmation_index),
-                "time": row["openTime"],
+                "index": i,
+                "time": row.name,
                 "type": "LOW",
-                "price": float(row["low"])
+                "price": float(row["low"]),
+                "confirmation_index": row.get(
+                    "swing_confirmation_index"
+                ),
             })
-
-    points.sort(
-        key=lambda x: x["index"]
-    )
 
     return points
 
 
 # ============================================================
-# 3. HH / HL / LH / LL
+# MARKET STRUCTURE CLASSIFICATION
 # ============================================================
 
-def classify_market_structure(df):
+def classify_market_structure(points):
     """
-    Swing pointlarni:
+    Classify structure points as:
 
+    HIGH:
         HH = Higher High
-        HL = Higher Low
         LH = Lower High
+
+    LOW:
+        HL = Higher Low
         LL = Lower Low
-
-    sifatida klassifikatsiya qiladi.
-
-    Bu klassifikatsiya faqat o'z turidagi oldingi
-    swing bilan taqqoslanadi.
     """
-
-    swing_points = get_swing_points(df)
 
     classified = []
 
-    previous_high = None
-    previous_low = None
+    last_high = None
+    last_low = None
 
-    for point in swing_points:
+    for point in points:
 
         item = point.copy()
 
-        # ----------------------------------------------------
-        # HIGH
-        # ----------------------------------------------------
-
         if point["type"] == "HIGH":
 
-            if previous_high is None:
+            if last_high is None:
+                item["classification"] = "FIRST_HIGH"
 
-                item["structure"] = "FIRST_HIGH"
-
-            elif point["price"] > previous_high:
-
-                item["structure"] = "HH"
+            elif point["price"] > last_high:
+                item["classification"] = "HH"
 
             else:
+                item["classification"] = "LH"
 
-                item["structure"] = "LH"
+            last_high = point["price"]
 
-            previous_high = point["price"]
+        else:
 
-        # ----------------------------------------------------
-        # LOW
-        # ----------------------------------------------------
+            if last_low is None:
+                item["classification"] = "FIRST_LOW"
 
-        elif point["type"] == "LOW":
-
-            if previous_low is None:
-
-                item["structure"] = "FIRST_LOW"
-
-            elif point["price"] > previous_low:
-
-                item["structure"] = "HL"
+            elif point["price"] > last_low:
+                item["classification"] = "HL"
 
             else:
+                item["classification"] = "LL"
 
-                item["structure"] = "LL"
-
-            previous_low = point["price"]
+            last_low = point["price"]
 
         classified.append(item)
 
@@ -225,765 +188,513 @@ def classify_market_structure(df):
 
 
 # ============================================================
-# 4. STRUCTURE TREND
+# STRUCTURE TREND
 # ============================================================
 
-def determine_structure_trend(structure_points):
+def determine_structure_trend(points):
     """
-    Oxirgi structure pointlar asosida trendni aniqlaydi.
+    Determine trend from recent HH/HL/LH/LL structure.
     """
 
-    if not structure_points:
-        return "NEUTRAL"
+    if not points:
+        return "UNKNOWN"
 
-    recent = structure_points[-12:]
+    recent = points[-12:]
 
-    hh_count = sum(
-        1 for p in recent
-        if p["structure"] == "HH"
-    )
+    bullish = 0
+    bearish = 0
 
-    hl_count = sum(
-        1 for p in recent
-        if p["structure"] == "HL"
-    )
+    for point in recent:
 
-    lh_count = sum(
-        1 for p in recent
-        if p["structure"] == "LH"
-    )
+        classification = point.get("classification")
 
-    ll_count = sum(
-        1 for p in recent
-        if p["structure"] == "LL"
-    )
+        if classification in ("HH", "HL"):
+            bullish += 1
 
-    bullish_score = hh_count + hl_count
-    bearish_score = lh_count + ll_count
+        elif classification in ("LH", "LL"):
+            bearish += 1
 
-    if bullish_score > bearish_score:
+    if bullish > bearish:
         return "BULLISH"
 
-    if bearish_score > bullish_score:
+    if bearish > bullish:
         return "BEARISH"
 
-    return "NEUTRAL"
+    return "RANGE"
 
 
 # ============================================================
-# 5. CAUSAL STRUCTURE TREND
+# INITIAL TREND
 # ============================================================
 
-def _get_initial_trend(available_points):
+def _get_initial_trend(points):
     """
-    Faqat o'sha vaqtgacha ma'lum bo'lgan structure pointlar
-    asosida boshlang'ich trendni aniqlaydi.
-
-    Kelajakdagi swing ishlatilmaydi.
+    Determine the initial directional bias from structure.
     """
 
-    highs = [
-        p for p in available_points
-        if p["type"] == "HIGH"
-    ]
+    if len(points) < 4:
+        return "UNKNOWN"
 
-    lows = [
-        p for p in available_points
-        if p["type"] == "LOW"
-    ]
+    bullish = 0
+    bearish = 0
 
-    if len(highs) < 2 or len(lows) < 2:
-        return "NEUTRAL"
+    for point in points[-12:]:
 
-    previous_high = highs[-2]
-    latest_high = highs[-1]
+        classification = point.get("classification")
 
-    previous_low = lows[-2]
-    latest_low = lows[-1]
+        if classification in ("HH", "HL"):
+            bullish += 1
 
-    higher_high = (
-        latest_high["price"]
-        > previous_high["price"]
-    )
+        elif classification in ("LH", "LL"):
+            bearish += 1
 
-    higher_low = (
-        latest_low["price"]
-        > previous_low["price"]
-    )
-
-    lower_high = (
-        latest_high["price"]
-        < previous_high["price"]
-    )
-
-    lower_low = (
-        latest_low["price"]
-        < previous_low["price"]
-    )
-
-    if higher_high and higher_low:
+    if bullish > bearish:
         return "BULLISH"
 
-    if lower_high and lower_low:
+    if bearish > bullish:
         return "BEARISH"
 
-    return "NEUTRAL"
+    return "RANGE"
 
 
 # ============================================================
-# 6. BOS + CHOCH
+# BOS / CHOCH
 # ============================================================
 
 def detect_structure_events(df, structure_points):
     """
-    BOS va CHOCH ni real-timega yaqin causal usulda aniqlaydi.
+    Detect BOS and CHOCH.
 
-    Qoidalar:
-
-    BULLISH trend:
-        close > oxirgi tasdiqlangan swing high
-            -> BULLISH BOS
-
-        close < oxirgi tasdiqlangan swing low
-            -> BEARISH CHOCH
-
-    BEARISH trend:
-        close < oxirgi tasdiqlangan swing low
-            -> BEARISH BOS
-
-        close > oxirgi tasdiqlangan swing high
-            -> BULLISH CHOCH
-
-    NEUTRAL:
-        kuchli breakout trendni boshlashi mumkin.
-
-    Bir xil swing level qayta-qayta signal bermaydi.
+    A structure point becomes breakable only after its
+    confirmation candle has formed.
     """
 
     if not structure_points:
-        return []
+        return [], []
 
-    events = []
+    bos_events = []
+    choch_events = []
 
-    current_trend = "NEUTRAL"
+    initial_trend = _get_initial_trend(structure_points)
 
     broken_highs = set()
     broken_lows = set()
 
-    # Eng oxirgi tasdiqlangan swinglar
-    active_high = None
-    active_low = None
-
-    # ========================================================
-    # HAR BIR CANDLE BO'YICHA
-    # ========================================================
+    current_trend = initial_trend
 
     for i in range(len(df)):
 
         row = df.iloc[i]
 
-        close = float(row["close"])
+        close_price = float(row["close"])
 
         # ----------------------------------------------------
-        # Shu candle vaqtigacha TASDIQLANGAN swinglar
+        # HIGH BREAKS
         # ----------------------------------------------------
 
-        available_points = [
-            p for p in structure_points
-            if p["confirmation_index"] <= i
-        ]
+        for point_id, point in enumerate(structure_points):
 
-        # ----------------------------------------------------
-        # Yangi HIGH / LOW larni olish
-        # ----------------------------------------------------
-
-        available_highs = [
-            p for p in available_points
-            if p["type"] == "HIGH"
-        ]
-
-        available_lows = [
-            p for p in available_points
-            if p["type"] == "LOW"
-        ]
-
-        if available_highs:
-
-            active_high = available_highs[-1]
-
-        if available_lows:
-
-            active_low = available_lows[-1]
-
-        # ----------------------------------------------------
-        # Boshlang'ich trend
-        # ----------------------------------------------------
-
-        if current_trend == "NEUTRAL":
-
-            current_trend = _get_initial_trend(
-                available_points
-            )
-
-        # ====================================================
-        # BULLISH TREND
-        # ====================================================
-
-        if current_trend == "BULLISH":
-
-            # ------------------------------------------------
-            # BEARISH CHOCH
-            # ------------------------------------------------
-
-            if (
-                active_low is not None
-                and active_low["index"] not in broken_lows
-                and close < active_low["price"]
-            ):
-
-                events.append({
-                    "time": row["openTime"],
-                    "type": "BEARISH_CHOCH",
-                    "price": close,
-                    "broken_level": active_low["price"],
-                    "swing_time": active_low["time"]
-                })
-
-                broken_lows.add(
-                    active_low["index"]
-                )
-
-                current_trend = "BEARISH"
-
+            if point_id in broken_highs:
                 continue
 
-            # ------------------------------------------------
-            # BULLISH BOS
-            # ------------------------------------------------
-
-            if (
-                active_high is not None
-                and active_high["index"] not in broken_highs
-                and close > active_high["price"]
-            ):
-
-                events.append({
-                    "time": row["openTime"],
-                    "type": "BULLISH_BOS",
-                    "price": close,
-                    "broken_level": active_high["price"],
-                    "swing_time": active_high["time"]
-                })
-
-                broken_highs.add(
-                    active_high["index"]
-                )
-
-        # ====================================================
-        # BEARISH TREND
-        # ====================================================
-
-        elif current_trend == "BEARISH":
-
-            # ------------------------------------------------
-            # BULLISH CHOCH
-            # ------------------------------------------------
-
-            if (
-                active_high is not None
-                and active_high["index"] not in broken_highs
-                and close > active_high["price"]
-            ):
-
-                events.append({
-                    "time": row["openTime"],
-                    "type": "BULLISH_CHOCH",
-                    "price": close,
-                    "broken_level": active_high["price"],
-                    "swing_time": active_high["time"]
-                })
-
-                broken_highs.add(
-                    active_high["index"]
-                )
-
-                current_trend = "BULLISH"
-
+            if point["type"] != "HIGH":
                 continue
 
-            # ------------------------------------------------
-            # BEARISH BOS
-            # ------------------------------------------------
+            confirmation_index = point.get("confirmation_index")
 
-            if (
-                active_low is not None
-                and active_low["index"] not in broken_lows
-                and close < active_low["price"]
-            ):
-
-                events.append({
-                    "time": row["openTime"],
-                    "type": "BEARISH_BOS",
-                    "price": close,
-                    "broken_level": active_low["price"],
-                    "swing_time": active_low["time"]
-                })
-
-                broken_lows.add(
-                    active_low["index"]
-                )
-
-        # ====================================================
-        # NEUTRAL HOLAT
-        # ====================================================
-
-        else:
-
-            # Bullish breakout
-            if (
-                active_high is not None
-                and active_high["index"] not in broken_highs
-                and close > active_high["price"]
-            ):
-
-                events.append({
-                    "time": row["openTime"],
-                    "type": "INITIAL_BULLISH_BOS",
-                    "price": close,
-                    "broken_level": active_high["price"],
-                    "swing_time": active_high["time"]
-                })
-
-                broken_highs.add(
-                    active_high["index"]
-                )
-
-                current_trend = "BULLISH"
-
+            if confirmation_index is None:
                 continue
 
-            # Bearish breakout
-            if (
-                active_low is not None
-                and active_low["index"] not in broken_lows
-                and close < active_low["price"]
-            ):
+            if i <= confirmation_index:
+                continue
 
-                events.append({
-                    "time": row["openTime"],
-                    "type": "INITIAL_BEARISH_BOS",
-                    "price": close,
-                    "broken_level": active_low["price"],
-                    "swing_time": active_low["time"]
-                })
+            level = float(point["price"])
 
-                broken_lows.add(
-                    active_low["index"]
-                )
+            if close_price > level:
 
-                current_trend = "BEARISH"
+                broken_highs.add(point_id)
 
-    return events
+                if current_trend == "BEARISH":
 
+                    choch_events.append({
+                        "index": i,
+                        "time": row.name,
+                        "type": "BULLISH_CHOCH",
+                        "price": close_price,
+                        "broken_level": level,
+                    })
 
-# ============================================================
-# 7. BOS VA CHOCH ALOHIDA OLISH
-# ============================================================
+                    current_trend = "BULLISH"
+
+                else:
+
+                    bos_events.append({
+                        "index": i,
+                        "time": row.name,
+                        "type": "BULLISH_BOS",
+                        "price": close_price,
+                        "broken_level": level,
+                    })
+
+        # ----------------------------------------------------
+        # LOW BREAKS
+        # ----------------------------------------------------
+
+        for point_id, point in enumerate(structure_points):
+
+            if point_id in broken_lows:
+                continue
+
+            if point["type"] != "LOW":
+                continue
+
+            confirmation_index = point.get("confirmation_index")
+
+            if confirmation_index is None:
+                continue
+
+            if i <= confirmation_index:
+                continue
+
+            level = float(point["price"])
+
+            if close_price < level:
+
+                broken_lows.add(point_id)
+
+                if current_trend == "BULLISH":
+
+                    choch_events.append({
+                        "index": i,
+                        "time": row.name,
+                        "type": "BEARISH_CHOCH",
+                        "price": close_price,
+                        "broken_level": level,
+                    })
+
+                    current_trend = "BEARISH"
+
+                else:
+
+                    bos_events.append({
+                        "index": i,
+                        "time": row.name,
+                        "type": "BEARISH_BOS",
+                        "price": close_price,
+                        "broken_level": level,
+                    })
+
+    return bos_events, choch_events
+
 
 def detect_bos(df, structure_points):
-    """
-    Faqat BOS hodisalarini qaytaradi.
-    """
-
-    events = detect_structure_events(
+    bos_events, _ = detect_structure_events(
         df,
         structure_points
     )
 
-    return [
-        event
-        for event in events
-        if "BOS" in event["type"]
-    ]
+    return bos_events
 
 
 def detect_choch(df, structure_points):
-    """
-    Faqat CHOCH hodisalarini qaytaradi.
-    """
-
-    events = detect_structure_events(
+    _, choch_events = detect_structure_events(
         df,
         structure_points
     )
 
-    return [
-        event
-        for event in events
-        if "CHOCH" in event["type"]
-    ]
+    return choch_events
 
 
 # ============================================================
-# 8. SUPPORT / RESISTANCE
+# PRICE LEVEL CLUSTERING
+# ============================================================
+
+def _cluster_levels(levels, tolerance=0.003):
+    """
+    Group nearby price levels into zones.
+
+    tolerance = percentage distance.
+    Example:
+        4280 and 4288 can become one zone.
+    """
+
+    if not levels:
+        return []
+
+    sorted_levels = sorted(levels)
+
+    clusters = []
+    current_cluster = [sorted_levels[0]]
+
+    for price in sorted_levels[1:]:
+
+        reference = sum(current_cluster) / len(current_cluster)
+
+        distance = abs(price - reference) / reference
+
+        if distance <= tolerance:
+
+            current_cluster.append(price)
+
+        else:
+
+            clusters.append(current_cluster)
+            current_cluster = [price]
+
+    clusters.append(current_cluster)
+
+    return clusters
+
+
+# ============================================================
+# SUPPORT / RESISTANCE
 # ============================================================
 
 def find_support_resistance(
     df,
-    max_levels=5,
-    tolerance=0.002
+    structure_points,
+    tolerance=0.003,
+    max_levels=3,
 ):
     """
-    Swing High / Swing Low asosida
-    Support va Resistance levelarni topadi.
+    Find meaningful support/resistance zones.
 
-    tolerance:
-        Bir-biriga yaqin levelarni bitta cluster qilish.
-
-        0.002 = 0.2%
+    Only structure points are used.
     """
 
-    structure_points = classify_market_structure(df)
+    if not structure_points:
 
-    current_price = float(
-        df.iloc[-1]["close"]
+        return {
+            "support": [],
+            "resistance": [],
+        }
+
+    current_price = float(df["close"].iloc[-1])
+
+    support_points = []
+    resistance_points = []
+
+    for point in structure_points:
+
+        price = float(point["price"])
+
+        if price < current_price:
+
+            support_points.append(price)
+
+        elif price > current_price:
+
+            resistance_points.append(price)
+
+    # --------------------------------------------------------
+    # CLUSTER
+    # --------------------------------------------------------
+
+    support_clusters = _cluster_levels(
+        support_points,
+        tolerance
     )
 
-    highs = [
-        p["price"]
-        for p in structure_points
-        if p["type"] == "HIGH"
-    ]
-
-    lows = [
-        p["price"]
-        for p in structure_points
-        if p["type"] == "LOW"
-    ]
-
-    # ========================================================
-    # LEVEL CLUSTER
-    # ========================================================
-
-    def cluster_levels(levels):
-
-        if not levels:
-            return []
-
-        levels = sorted(levels)
-
-        clusters = []
-
-        for level in levels:
-
-            added = False
-
-            for cluster in clusters:
-
-                average = sum(cluster) / len(cluster)
-
-                distance = (
-                    abs(level - average)
-                    / average
-                )
-
-                if distance <= tolerance:
-
-                    cluster.append(level)
-
-                    added = True
-
-                    break
-
-            if not added:
-
-                clusters.append([level])
-
-        result = []
-
-        for cluster in clusters:
-
-            average = (
-                sum(cluster)
-                / len(cluster)
-            )
-
-            result.append({
-                "price": average,
-                "touches": len(cluster)
-            })
-
-        return result
-
-    all_resistance = cluster_levels(highs)
-    all_support = cluster_levels(lows)
-
-    # ========================================================
-    # PRICE BO'YICHA AJRATISH
-    # ========================================================
-
-    resistance = [
-        level
-        for level in all_resistance
-        if level["price"] > current_price
-    ]
-
-    support = [
-        level
-        for level in all_support
-        if level["price"] < current_price
-    ]
-
-    # Eng yaqin levelardan boshlab
-    resistance.sort(
-        key=lambda x: x["price"]
+    resistance_clusters = _cluster_levels(
+        resistance_points,
+        tolerance
     )
 
-    support.sort(
+    # --------------------------------------------------------
+    # CREATE ZONES
+    # --------------------------------------------------------
+
+    def build_zone(cluster):
+
+        if not cluster:
+            return None
+
+        center = sum(cluster) / len(cluster)
+
+        low = min(cluster)
+        high = max(cluster)
+
+        touches = len(cluster)
+
+        return {
+            "price": round(center, 3),
+            "low": round(low, 3),
+            "high": round(high, 3),
+            "touches": touches,
+            "strength": touches,
+        }
+
+    supports = [
+        build_zone(cluster)
+        for cluster in support_clusters
+    ]
+
+    resistances = [
+        build_zone(cluster)
+        for cluster in resistance_clusters
+    ]
+
+    supports = [x for x in supports if x]
+    resistances = [x for x in resistances if x]
+
+    # --------------------------------------------------------
+    # SUPPORT:
+    # nearest to current price first
+    # --------------------------------------------------------
+
+    supports.sort(
         key=lambda x: x["price"],
         reverse=True
     )
 
-    resistance = resistance[:max_levels]
-    support = support[:max_levels]
+    # --------------------------------------------------------
+    # RESISTANCE:
+    # nearest to current price first
+    # --------------------------------------------------------
+
+    resistances.sort(
+        key=lambda x: x["price"]
+    )
+
+    supports = supports[:max_levels]
+    resistances = resistances[:max_levels]
 
     return {
-        "support": support,
-        "resistance": resistance
+        "support": supports,
+        "resistance": resistances,
     }
 
 
 # ============================================================
-# 9. TO'LIQ MARKET STRUCTURE TAHLILI
+# FULL STRUCTURE ANALYSIS
 # ============================================================
 
-def analyze_structure(
-    df,
-    left=3,
-    right=3
-):
+def analyze_structure(df):
     """
-    Bitta timeframe uchun to'liq
-    Market Structure Analysis.
+    Complete market structure analysis.
     """
 
-    df = detect_swings(
+    swing_df = detect_swings(
         df,
-        left=left,
-        right=right
+        left=3,
+        right=3
+    )
+
+    raw_points = get_swing_points(
+        swing_df
     )
 
     structure_points = classify_market_structure(
-        df
+        raw_points
     )
 
     trend = determine_structure_trend(
         structure_points
     )
 
-    structure_events = detect_structure_events(
+    bos_events, choch_events = detect_structure_events(
         df,
         structure_points
     )
 
-    bos = [
-        event
-        for event in structure_events
-        if "BOS" in event["type"]
-    ]
-
-    choch = [
-        event
-        for event in structure_events
-        if "CHOCH" in event["type"]
-    ]
-
-    support_resistance = find_support_resistance(
-        df
+    levels = find_support_resistance(
+        df,
+        structure_points,
+        tolerance=0.003,
+        max_levels=3,
     )
 
     return {
         "trend": trend,
-        "structure_points": structure_points,
-        "events": structure_events,
-        "bos": bos,
-        "choch": choch,
-        "support": support_resistance["support"],
-        "resistance": support_resistance["resistance"],
-        "data": df
+        "points": structure_points,
+        "bos": bos_events,
+        "choch": choch_events,
+        "support": levels["support"],
+        "resistance": levels["resistance"],
     }
 
 
 # ============================================================
-# 10. TEST
+# DIRECT TEST
 # ============================================================
 
 if __name__ == "__main__":
 
-    from data.market_data import get_xauusd_candles
+    from data.market_data import (
+        get_xauusd_historical_candles
+    )
 
     print("=" * 70)
     print("XAU/USD MARKET STRUCTURE TEST")
     print("=" * 70)
 
-    # 4H ma'lumot
-    df = get_xauusd_candles(
+    df = get_xauusd_historical_candles(
         interval="4h",
-        limit=250
+        required_bars=300
+    )
+
+    result = analyze_structure(df)
+
+    print()
+    print("Trend:", result["trend"])
+
+    print(
+        "Structure points:",
+        len(result["points"])
     )
 
     print(
-        f"\nCandle soni: {len(df)}"
+        "BOS:",
+        len(result["bos"])
     )
-
-    # ========================================================
-    # ANALYSIS
-    # ========================================================
-
-    result = analyze_structure(
-        df,
-        left=3,
-        right=3
-    )
-
-    # ========================================================
-    # TREND
-    # ========================================================
-
-    print("\n" + "=" * 70)
-    print("MARKET STRUCTURE TREND")
-    print("=" * 70)
 
     print(
-        "Trend:",
-        result["trend"]
+        "CHOCH:",
+        len(result["choch"])
     )
 
-    # ========================================================
-    # STRUCTURE POINTS
-    # ========================================================
+    print()
+    print("LAST STRUCTURE POINTS")
 
-    print("\n" + "=" * 70)
-    print("OXIRGI STRUCTURE POINTLAR")
-    print("=" * 70)
-
-    for point in result[
-        "structure_points"
-    ][-15:]:
+    for point in result["points"][-15:]:
 
         print(
-            f"{point['time']} | "
-            f"{point['type']:4} | "
-            f"{point['structure']:10} | "
-            f"{point['price']:.2f} | "
-            f"ConfirmIndex: "
-            f"{point['confirmation_index']}"
+            point["time"],
+            "|",
+            point["type"],
+            "|",
+            point["classification"],
+            "|",
+            f'{point["price"]:.3f}'
         )
 
-    # ========================================================
-    # BOS
-    # ========================================================
-
-    print("\n" + "=" * 70)
-    print("BOS")
-    print("=" * 70)
-
-    if result["bos"]:
-
-        for event in result["bos"][-10:]:
-
-            print(
-                f"{event['time']} | "
-                f"{event['type']:22} | "
-                f"Price: "
-                f"{event['price']:.2f} | "
-                f"Broken: "
-                f"{event['broken_level']:.2f} | "
-                f"Swing: "
-                f"{event['swing_time']}"
-            )
-
-    else:
-
-        print("BOS topilmadi.")
-
-    # ========================================================
-    # CHOCH
-    # ========================================================
-
-    print("\n" + "=" * 70)
-    print("CHOCH")
-    print("=" * 70)
-
-    if result["choch"]:
-
-        for event in result["choch"][-10:]:
-
-            print(
-                f"{event['time']} | "
-                f"{event['type']:22} | "
-                f"Price: "
-                f"{event['price']:.2f} | "
-                f"Broken: "
-                f"{event['broken_level']:.2f} | "
-                f"Swing: "
-                f"{event['swing_time']}"
-            )
-
-    else:
-
-        print("CHOCH topilmadi.")
-
-    # ========================================================
-    # SUPPORT
-    # ========================================================
-
-    print("\n" + "=" * 70)
+    print()
     print("SUPPORT")
-    print("=" * 70)
 
-    if result["support"]:
+    for level in result["support"]:
 
-        for level in result["support"]:
+        print(
+            f'{level["price"]:.3f}',
+            "| zone:",
+            f'{level["low"]:.3f}',
+            "-",
+            f'{level["high"]:.3f}',
+            "| touches=",
+            level["touches"]
+        )
 
-            print(
-                f"Support: "
-                f"{level['price']:.2f} | "
-                f"Touches: "
-                f"{level['touches']}"
-            )
-
-    else:
-
-        print("Support topilmadi.")
-
-    # ========================================================
-    # RESISTANCE
-    # ========================================================
-
-    print("\n" + "=" * 70)
+    print()
     print("RESISTANCE")
-    print("=" * 70)
 
-    if result["resistance"]:
+    for level in result["resistance"]:
 
-        for level in result["resistance"]:
+        print(
+            f'{level["price"]:.3f}',
+            "| zone:",
+            f'{level["low"]:.3f}',
+            "-",
+            f'{level["high"]:.3f}',
+            "| touches=",
+            level["touches"]
+        )
 
-            print(
-                f"Resistance: "
-                f"{level['price']:.2f} | "
-                f"Touches: "
-                f"{level['touches']}"
-            )
-
-    else:
-
-        print("Resistance topilmadi.")
-
-    # ========================================================
-    # FINAL
-    # ========================================================
-
-    print("\n" + "=" * 70)
-    print("MARKET STRUCTURE TEST YAKUNLANDI")
-    print("=" * 70)
