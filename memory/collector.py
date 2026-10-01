@@ -1,10 +1,12 @@
 import sys
 import time
 from pathlib import Path
-from datetime import datetime, timezone
+
+import pandas as pd
+
 
 # ============================================================
-# XAU_AI loyiha papkasini Python PATH ga qo'shish
+# PROJECT ROOT
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -14,95 +16,61 @@ if str(BASE_DIR) not in sys.path:
 
 
 # ============================================================
-# XAU_AI modullarini import qilish
+# IMPORTS
 # ============================================================
 
 from data.market_data import get_xauusd_candles
+
 from memory.database import (
     initialize_database,
     save_candle,
-    get_candle_count
+    get_candle_count,
 )
 
 
 # ============================================================
-# Collector sozlamalari
+# SETTINGS
 # ============================================================
 
-TIMEFRAMES = {
-    "5m": 1000,
-    "15m": 1000,
-    "1h": 1000,
-    "4h": 1000,
-    "1d": 500,
-}
-
-# Har bir aylanish orasidagi kutish vaqti
-# 60 soniya = 1 daqiqa
 COLLECT_INTERVAL = 60
 
-
-# ============================================================
-# Vaqt
-# ============================================================
-
-def current_time():
-    return datetime.now(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
+FETCH_LIMITS = {
+    "5m": 20,
+    "15m": 10,
+    "1h": 5,
+    "4h": 3,
+    "1d": 2,
+}
 
 
 # ============================================================
-# Bitta timeframe'ni yig'ish
+# SAVE DATAFRAME
 # ============================================================
 
-def collect_timeframe(timeframe: str, limit: int) -> int:
+def save_dataframe_candles(
+    timeframe: str,
+    df: pd.DataFrame
+):
+    saved = 0
 
-    print()
-    print("-" * 70)
-    print(
-        f"[{timeframe.upper()}] "
-        f"Ma'lumot olinmoqda..."
-    )
-    print("-" * 70)
+    if df is None or df.empty:
+        print("  No data received.")
+        return 0
 
-    try:
+    for _, row in df.iterrows():
 
-        df = get_xauusd_candles(
-            interval=timeframe,
-            limit=limit
-        )
-
-        if df is None or df.empty:
-
-            print(
-                f"[{timeframe.upper()}] "
-                f"Ma'lumot kelmadi."
-            )
-
-            return 0
-
-
-        saved = 0
-
-
-        for _, row in df.iterrows():
+        try:
+            # ------------------------------------------------
+            # BiQuote column names
+            # ------------------------------------------------
 
             open_time = row["openTime"]
-
-
-            # pandas Timestamp -> ISO
-            if hasattr(open_time, "isoformat"):
-                open_time = open_time.isoformat()
-
 
             open_price = float(row["open"])
             high = float(row["high"])
             low = float(row["low"])
             close = float(row["close"])
 
-
-            # Volume
             volume = float(
                 row.get("volume", 0) or 0
             )
@@ -111,14 +79,25 @@ def collect_timeframe(timeframe: str, limit: int) -> int:
                 row.get("tickVolume", 0) or 0
             )
 
-
-            # Candle ochiq yoki yopiq
             is_open = bool(
                 row.get("isOpen", False)
             )
 
+            # ------------------------------------------------
+            # Timestamp
+            # ------------------------------------------------
 
-            # SQLite'ga yozish
+            open_time = pd.to_datetime(
+                open_time,
+                utc=True
+            )
+
+            open_time = open_time.isoformat()
+
+            # ------------------------------------------------
+            # Save to SQLite
+            # ------------------------------------------------
+
             save_candle(
                 timeframe=timeframe,
                 open_time=open_time,
@@ -128,116 +107,153 @@ def collect_timeframe(timeframe: str, limit: int) -> int:
                 close=close,
                 volume=volume,
                 tick_volume=tick_volume,
-                is_open=is_open
+                is_open=is_open,
             )
 
             saved += 1
 
+        except Exception as e:
 
-        total = get_candle_count(timeframe)
+            print(
+                f"  Candle save error: {e}"
+            )
+
+    return saved
 
 
-        print(
-            f"[{timeframe.upper()}] "
-            f"API: {len(df)} | "
-            f"Jami DB: {total}"
+# ============================================================
+# COLLECT ONE TIMEFRAME
+# ============================================================
+
+def collect_timeframe(
+    timeframe: str,
+    limit: int
+):
+
+    print()
+    print(f"[{timeframe.upper()}]")
+    print(
+        f"API request: last {limit} candles"
+    )
+
+    try:
+
+        df = get_xauusd_candles(
+            interval=timeframe,
+            limit=limit
         )
-
-
-        return saved
-
 
     except Exception as e:
 
         print(
-            f"[{timeframe.upper()}] "
-            f"XATO: {e}"
+            f"API error: {e}"
         )
 
         return 0
 
+    if df is None or df.empty:
+
+        print("API candles: 0")
+        print("Saved/updated: 0")
+
+        return 0
+
+    print(
+        f"API candles: {len(df)}"
+    )
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    saved = save_dataframe_candles(
+        timeframe=timeframe,
+        df=df
+    )
+
+    total = get_candle_count(
+        timeframe
+    )
+
+    print(
+        f"Saved/updated: {saved}"
+    )
+
+    print(
+        f"DB total:      {total}"
+    )
+
+    return saved
+
 
 # ============================================================
-# Barcha timeframe'larni yig'ish
+# COLLECT ALL
 # ============================================================
 
 def collect_all():
 
     print()
     print("=" * 70)
-    print("XAU_AI MARKET MEMORY COLLECTOR V2")
+    print("XAU_AI MARKET COLLECTOR V3")
     print("=" * 70)
-
-    print(
-        f"Vaqt: {current_time()}"
-    )
-
 
     initialize_database()
 
-
     total_saved = 0
 
+    for timeframe, limit in FETCH_LIMITS.items():
 
-    for timeframe, limit in TIMEFRAMES.items():
-
-        total_saved += collect_timeframe(
+        saved = collect_timeframe(
             timeframe,
             limit
         )
 
+        total_saved += saved
+
+    # --------------------------------------------------------
+    # Status
+    # --------------------------------------------------------
 
     print()
     print("-" * 70)
-    print("DATABASE HOLATI")
-    print("-" * 70)
+    print("Cycle finished.")
+    print(
+        f"Rows processed: {total_saved}"
+    )
 
-
-    for timeframe in TIMEFRAMES:
-
-        count = get_candle_count(timeframe)
-
-        print(
-            f"{timeframe.upper():>4}: "
-            f"{count} candle"
-        )
-
-
-    print("-" * 70)
+    print()
+    print("DATABASE STATUS")
 
     print(
-        f"Qayta ishlangan: {total_saved}"
+        f"5M : {get_candle_count('5m')}"
     )
+
+    print(
+        f"15M: {get_candle_count('15m')}"
+    )
+
+    print(
+        f"1H : {get_candle_count('1h')}"
+    )
+
+    print(
+        f"4H : {get_candle_count('4h')}"
+    )
+
+    print(
+        f"1D : {get_candle_count('1d')}"
+    )
+
+    print("=" * 70)
 
 
 # ============================================================
-# DOIMIY COLLECTOR
+# CONTINUOUS MODE
 # ============================================================
 
 def run_forever():
 
-    print()
-    print("=" * 70)
-    print("XAU_AI CONTINUOUS MARKET MEMORY")
-    print("=" * 70)
-
-    print()
-    print(
-        "Collector doimiy ishlaydi."
-    )
-
-    print(
-        f"Tekshirish intervali: "
-        f"{COLLECT_INTERVAL} soniya"
-    )
-
-    print()
-    print(
-        "To'xtatish: CTRL + C"
-    )
-
-    print("=" * 70)
-
+    initialize_database()
 
     while True:
 
@@ -245,56 +261,47 @@ def run_forever():
 
             collect_all()
 
-
-            print()
-            print(
-                f"Keyingi tekshiruv "
-                f"{COLLECT_INTERVAL} soniyadan keyin..."
-            )
-
-
-            time.sleep(
-                COLLECT_INTERVAL
-            )
-
-
         except KeyboardInterrupt:
 
             print()
-            print("=" * 70)
             print(
-                "COLLECTOR TO'XTATILDI"
+                "Collector stopped by user."
             )
-            print("=" * 70)
 
             break
-
 
         except Exception as e:
 
             print()
             print(
-                "COLLECTOR XATO:"
+                f"Collector error: {e}"
             )
 
-            print(e)
+        print()
+        print(
+            f"Waiting {COLLECT_INTERVAL} seconds..."
+        )
 
-            print()
-            print(
-                f"{COLLECT_INTERVAL} "
-                f"soniyadan keyin qayta uriniladi..."
-            )
+        try:
 
             time.sleep(
                 COLLECT_INTERVAL
             )
 
+        except KeyboardInterrupt:
+
+            print()
+            print(
+                "Collector stopped by user."
+            )
+
+            break
+
 
 # ============================================================
-# PROGRAM START
+# MAIN
 # ============================================================
 
 if __name__ == "__main__":
 
     run_forever()
-
