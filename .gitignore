@@ -27,3 +27,5 @@ Thumbs.db
 
 # Generated data
 output/data/xau_ai_memory.db
+.env
+data/*.db
