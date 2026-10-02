@@ -2,10 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from analysis.scalping_5m import (
-    analyze_5m,
-    detect_liquidity_sweep,
-)
+from analysis.scalping_5m import analyze_5m
 from analysis.indicators import calculate_indicators
 from strategy_lab.historical_data import (
     load_historical_5m,
@@ -32,6 +29,7 @@ DEFAULT_5M_PATH = (
 # ============================================================
 
 WARMUP_5M = 250
+
 WARMUP_15M = 250
 WARMUP_1H = 250
 WARMUP_4H = 250
@@ -41,64 +39,49 @@ MIN_HTF_CANDLES = 50
 
 
 # ============================================================
-# HELPERS
+# DATAFRAME NORMALIZATION
 # ============================================================
 
 def normalize_ohlc(df):
     """
-    OHLC dataframe ustunlarini standart holatga keltiradi.
+    OHLC dataframe timestampini standart holatga keltiradi.
     """
 
     data = df.copy()
 
     if "datetime" in data.columns:
+
         data["openTime"] = pd.to_datetime(
             data["datetime"],
             utc=True,
         )
 
     elif "openTime" in data.columns:
+
         data["openTime"] = pd.to_datetime(
             data["openTime"],
             utc=True,
         )
 
     else:
+
         raise ValueError(
-            "DataFrame'da datetime yoki openTime yo'q."
+            "DataFrame'da datetime yoki openTime mavjud emas."
         )
 
-    data = data.sort_values(
-        "openTime"
-    ).reset_index(drop=True)
+    data = (
+        data
+        .sort_values("openTime")
+        .drop_duplicates("openTime")
+        .reset_index(drop=True)
+    )
 
     return data
 
 
-def get_latest_closed_before(
-    df,
-    timestamp,
-):
-    """
-    timestamp'dan OLDIN mavjud bo'lgan oxirgi candle'ni
-    qaytaradi.
-
-    Muhim:
-    signal timestampidagi hali yopilmagan candle ishlatilmaydi.
-
-    Bu historical analysis uchun lookahead bias'ni
-    oldini olishning asosiy qoidalaridan biri.
-    """
-
-    data = df[
-        df["openTime"] < timestamp
-    ]
-
-    if data.empty:
-        return None
-
-    return data.iloc[-1]
-
+# ============================================================
+# HISTORICAL CLOSED DATA
+# ============================================================
 
 def get_closed_history(
     df,
@@ -106,8 +89,13 @@ def get_closed_history(
     limit=None,
 ):
     """
-    Faqat signal timestampidan OLDIN yopilgan
-    candle'larni qaytaradi.
+    Faqat timestampdan OLDIN mavjud bo'lgan candlelarni qaytaradi.
+
+    Muhim:
+    timestamp candle'ining o'zi ishlatilmaydi.
+
+    Shu orqali signal vaqtida hali noma'lum bo'lgan
+    candle ma'lumotlaridan foydalanishning oldini olamiz.
     """
 
     data = df[
@@ -120,38 +108,52 @@ def get_closed_history(
     return data.reset_index(drop=True)
 
 
-def direction_from_indicators(
-    indicators,
+# ============================================================
+# INDICATOR DIRECTION
+# ============================================================
+
+def direction_from_indicator_row(
+    row,
 ):
     """
-    analysis.indicators natijasidan yo'nalish chiqaradi.
+    analysis.indicators.calculate_indicators()
+    qaytargan DataFrame'ning oxirgi qatoridan
+    V3.1 yo'nalish mantig'ini chiqaradi.
 
-    V3.1 bilan bir xil asosiy yo'nalish mantig'idan foydalanadi.
+    Ishlatiladigan ustunlar:
+        close
+        EMA20
+        EMA50
+        EMA200
+        RSI14
+        MACD
+        MACD_SIGNAL
+        DI_PLUS
+        DI_MINUS
     """
 
-    if not indicators:
+    if row is None:
         return "NEUTRAL"
 
     bullish = 0
     bearish = 0
 
-    price = indicators.get("price")
-    ema20 = indicators.get("ema20")
-    ema50 = indicators.get("ema50")
-    ema200 = indicators.get("ema200")
-    rsi = indicators.get("rsi14")
-    macd = indicators.get("macd")
-    macd_signal = indicators.get("macd_signal")
-    di_plus = indicators.get("di_plus")
-    di_minus = indicators.get("di_minus")
+    # --------------------------------------------------------
+    # CLOSE / PRICE
+    # --------------------------------------------------------
+
+    price = row.get("close")
+    ema20 = row.get("EMA20")
+    ema50 = row.get("EMA50")
+    ema200 = row.get("EMA200")
 
     # --------------------------------------------------------
     # PRICE vs EMA20
     # --------------------------------------------------------
 
     if (
-        price is not None
-        and ema20 is not None
+        pd.notna(price)
+        and pd.notna(ema20)
     ):
 
         if price > ema20:
@@ -165,8 +167,8 @@ def direction_from_indicators(
     # --------------------------------------------------------
 
     if (
-        ema20 is not None
-        and ema50 is not None
+        pd.notna(ema20)
+        and pd.notna(ema50)
     ):
 
         if ema20 > ema50:
@@ -180,8 +182,8 @@ def direction_from_indicators(
     # --------------------------------------------------------
 
     if (
-        price is not None
-        and ema200 is not None
+        pd.notna(price)
+        and pd.notna(ema200)
     ):
 
         if price > ema200:
@@ -194,7 +196,9 @@ def direction_from_indicators(
     # RSI
     # --------------------------------------------------------
 
-    if rsi is not None:
+    rsi = row.get("RSI14")
+
+    if pd.notna(rsi):
 
         if rsi >= 55:
             bullish += 2
@@ -206,9 +210,12 @@ def direction_from_indicators(
     # MACD
     # --------------------------------------------------------
 
+    macd = row.get("MACD")
+    macd_signal = row.get("MACD_SIGNAL")
+
     if (
-        macd is not None
-        and macd_signal is not None
+        pd.notna(macd)
+        and pd.notna(macd_signal)
     ):
 
         if macd > macd_signal:
@@ -221,9 +228,12 @@ def direction_from_indicators(
     # DI
     # --------------------------------------------------------
 
+    di_plus = row.get("DI_PLUS")
+    di_minus = row.get("DI_MINUS")
+
     if (
-        di_plus is not None
-        and di_minus is not None
+        pd.notna(di_plus)
+        and pd.notna(di_minus)
     ):
 
         if di_plus > di_minus:
@@ -246,6 +256,67 @@ def direction_from_indicators(
 
 
 # ============================================================
+# HISTORICAL TIMEFRAME DIRECTION
+# ============================================================
+
+def calculate_historical_direction(
+    df,
+    timestamp,
+    warmup,
+):
+    """
+    Berilgan historical timestamp uchun timeframe
+    directionini hisoblaydi.
+
+    Faqat timestampdan OLDIN yopilgan candlelar ishlatiladi.
+    """
+
+    history = get_closed_history(
+        df,
+        timestamp,
+        warmup,
+    )
+
+    if len(history) < MIN_HTF_CANDLES:
+        return {
+            "direction": "NEUTRAL",
+            "candles": len(history),
+        }
+
+    try:
+
+        indicators = calculate_indicators(
+            history
+        )
+
+        if indicators.empty:
+            return {
+                "direction": "NEUTRAL",
+                "candles": len(history),
+            }
+
+        latest = indicators.iloc[-1]
+
+        direction = direction_from_indicator_row(
+            latest
+        )
+
+        return {
+            "direction": direction,
+            "candles": len(history),
+            "indicators": latest,
+        }
+
+    except Exception as exc:
+
+        return {
+            "direction": "NEUTRAL",
+            "candles": len(history),
+            "error": str(exc),
+        }
+
+
+# ============================================================
 # HISTORICAL HTF ANALYSIS
 # ============================================================
 
@@ -257,81 +328,35 @@ def analyze_htf_at_time(
     timestamp,
 ):
     """
-    Historical timestamp uchun HTF analysis.
-
-    Muhim:
-    Har bir timeframe'da faqat timestamp'dan OLDIN
-    yopilgan candle'lar ishlatiladi.
-
-    Hozircha V3.1 final signalini emas,
-    timeframe direction'larini research qilamiz.
+    Historical 1D / 4H / 1H / 15M analysis.
     """
 
-    histories = {
-        "1d": get_closed_history(
+    return {
+        "1d": calculate_historical_direction(
             df_1d,
             timestamp,
             WARMUP_1D,
         ),
-        "4h": get_closed_history(
+        "4h": calculate_historical_direction(
             df_4h,
             timestamp,
             WARMUP_4H,
         ),
-        "1h": get_closed_history(
+        "1h": calculate_historical_direction(
             df_1h,
             timestamp,
             WARMUP_1H,
         ),
-        "15m": get_closed_history(
+        "15m": calculate_historical_direction(
             df_15m,
             timestamp,
             WARMUP_15M,
         ),
     }
 
-    result = {}
-
-    for timeframe, data in histories.items():
-
-        if len(data) < MIN_HTF_CANDLES:
-            result[timeframe] = {
-                "direction": "NEUTRAL",
-                "indicators": {},
-                "candles": len(data),
-            }
-            continue
-
-        try:
-
-            indicators = calculate_indicators(
-                data
-            )
-
-            direction = direction_from_indicators(
-                indicators
-            )
-
-            result[timeframe] = {
-                "direction": direction,
-                "indicators": indicators,
-                "candles": len(data),
-            }
-
-        except Exception as exc:
-
-            result[timeframe] = {
-                "direction": "NEUTRAL",
-                "indicators": {},
-                "candles": len(data),
-                "error": str(exc),
-            }
-
-    return result
-
 
 # ============================================================
-# 5M SWEEP ANALYSIS
+# 5M HISTORICAL ANALYSIS
 # ============================================================
 
 def analyze_5m_at_time(
@@ -341,12 +366,7 @@ def analyze_5m_at_time(
     """
     Historical 5M analysis.
 
-    Sweep signal timestampidan OLDIN yopilgan candle'lar
-    asosida aniqlanadi.
-
-    analyze_5m() oxirgi candle'ni current candle deb qabul
-    qilishi sababli timestamp'dan oldingi closed history
-    beriladi.
+    Faqat timestampdan OLDIN yopilgan candlelar beriladi.
     """
 
     history = get_closed_history(
@@ -356,6 +376,7 @@ def analyze_5m_at_time(
     )
 
     if len(history) < WARMUP_5M:
+
         return {
             "ready": False,
             "direction": "NEUTRAL",
@@ -397,21 +418,6 @@ def analyze_5m_at_time(
 
 
 # ============================================================
-# HTF PATTERN
-# ============================================================
-
-def get_htf_pattern(
-    htf,
-):
-    return (
-        htf["1d"]["direction"],
-        htf["4h"]["direction"],
-        htf["1h"]["direction"],
-        htf["15m"]["direction"],
-    )
-
-
-# ============================================================
 # SETUP CLASSIFICATION
 # ============================================================
 
@@ -421,11 +427,10 @@ def classify_setup(
     liquidity_sweep,
 ):
     """
-    Research setup classification.
+    Historical research setup classification.
 
-    Bu hali strategiyaning yakuniy qoidasi EMAS.
-
-    Faqat tarixdagi setup'larni kategoriyalash uchun ishlatiladi.
+    Bu hali yakuniy trading qoidasi emas.
+    Research uchun kategoriyalar.
     """
 
     d1 = htf["1d"]["direction"]
@@ -434,7 +439,7 @@ def classify_setup(
     m15 = htf["15m"]["direction"]
 
     # --------------------------------------------------------
-    # CURRENT STRICT V3.1 STYLE
+    # STRICT BULLISH
     # --------------------------------------------------------
 
     if (
@@ -448,6 +453,10 @@ def classify_setup(
 
         return "STRICT_BULLISH"
 
+    # --------------------------------------------------------
+    # STRICT BEARISH
+    # --------------------------------------------------------
+
     if (
         d1 == "BEARISH"
         and h4 == "BEARISH"
@@ -460,7 +469,7 @@ def classify_setup(
         return "STRICT_BEARISH"
 
     # --------------------------------------------------------
-    # HTF + SWEEP
+    # HTF + SWEEP BULLISH
     # --------------------------------------------------------
 
     if (
@@ -472,6 +481,10 @@ def classify_setup(
 
         return "HTF_SWEEP_BULLISH"
 
+    # --------------------------------------------------------
+    # HTF + SWEEP BEARISH
+    # --------------------------------------------------------
+
     if (
         d1 == "BEARISH"
         and h4 == "BEARISH"
@@ -482,7 +495,7 @@ def classify_setup(
         return "HTF_SWEEP_BEARISH"
 
     # --------------------------------------------------------
-    # RETRACEMENT + SWEEP
+    # RETRACEMENT BULLISH
     # --------------------------------------------------------
 
     if (
@@ -496,6 +509,10 @@ def classify_setup(
 
         return "RETRACEMENT_BULLISH"
 
+    # --------------------------------------------------------
+    # RETRACEMENT BEARISH
+    # --------------------------------------------------------
+
     if (
         d1 == "BEARISH"
         and h4 == "BEARISH"
@@ -508,7 +525,7 @@ def classify_setup(
         return "RETRACEMENT_BEARISH"
 
     # --------------------------------------------------------
-    # SWEEP ONLY
+    # 5M SWEEP ONLY
     # --------------------------------------------------------
 
     if (
@@ -539,28 +556,24 @@ def run_historical_research(
     """
     Historical research engine.
 
-    step:
-        Har N-chi 5M candle'da tekshirish.
-
-    Default:
-        step=1
-
-    Muhim:
-    Bu engine hozircha outcome hisoblamaydi.
-
-    Maqsad:
-        tarixdagi setup'larni aniqlash.
+    Lookahead bias qoidasi:
+        signal timestampidan keyingi ma'lumot
+        signal aniqlashda ishlatilmaydi.
     """
 
     print(
         "=" * 70
     )
     print(
-        "XAU_AI HISTORICAL RESEARCH ENGINE V5"
+        "XAU_AI HISTORICAL RESEARCH ENGINE V5.1"
     )
     print(
         "=" * 70
     )
+
+    # --------------------------------------------------------
+    # LOAD
+    # --------------------------------------------------------
 
     print(
         "\nLoading 5M historical data..."
@@ -575,7 +588,7 @@ def run_historical_research(
     )
 
     # --------------------------------------------------------
-    # RESAMPLE
+    # TIMEFRAMES
     # --------------------------------------------------------
 
     print(
@@ -638,14 +651,12 @@ def run_historical_research(
 
     total = len(df_5m)
 
-    start_index = WARMUP_5M
-
     print(
         "\nScanning historical 5M candles..."
     )
 
     for index in range(
-        start_index,
+        WARMUP_5M,
         total,
         step,
     ):
@@ -670,12 +681,12 @@ def run_historical_research(
             "liquidity_sweep"
         ]
 
-        # ----------------------------------------------------
-        # Faqat sweep mavjud bo'lsa HTF analysis
-        # ----------------------------------------------------
-
         if liquidity_sweep == "NONE":
             continue
+
+        # ----------------------------------------------------
+        # HTF
+        # ----------------------------------------------------
 
         htf = analyze_htf_at_time(
             df_1d,
@@ -695,23 +706,21 @@ def run_historical_research(
             liquidity_sweep,
         )
 
-        result = {
-            "timestamp": timestamp,
-            "price": float(
-                row["close"]
-            ),
-            "liquidity_sweep": liquidity_sweep,
-            "direction_5m": direction_5m,
-            "setup": setup,
-            "1d": htf["1d"]["direction"],
-            "4h": htf["4h"]["direction"],
-            "1h": htf["1h"]["direction"],
-            "15m": htf["15m"]["direction"],
-            "atr_5m": analysis_5m["atr"],
-        }
-
         results.append(
-            result
+            {
+                "timestamp": timestamp,
+                "price": float(
+                    row["close"]
+                ),
+                "liquidity_sweep": liquidity_sweep,
+                "direction_5m": direction_5m,
+                "setup": setup,
+                "1d": htf["1d"]["direction"],
+                "4h": htf["4h"]["direction"],
+                "1h": htf["1h"]["direction"],
+                "15m": htf["15m"]["direction"],
+                "atr_5m": analysis_5m["atr"],
+            }
         )
 
     return pd.DataFrame(
@@ -730,7 +739,7 @@ def print_summary(
         "\n" + "=" * 70
     )
     print(
-        "HISTORICAL RESEARCH SUMMARY"
+        "HISTORICAL RESEARCH SUMMARY V5.1"
     )
     print(
         "=" * 70
@@ -748,6 +757,10 @@ def print_summary(
         f"\nTotal sweep points: {len(results)}"
     )
 
+    # --------------------------------------------------------
+    # SWEEP
+    # --------------------------------------------------------
+
     print(
         "\nLIQUIDITY SWEEP:"
     )
@@ -755,8 +768,14 @@ def print_summary(
     print(
         results[
             "liquidity_sweep"
-        ].value_counts().to_string()
+        ]
+        .value_counts()
+        .to_string()
     )
+
+    # --------------------------------------------------------
+    # 5M
+    # --------------------------------------------------------
 
     print(
         "\n5M DIRECTION:"
@@ -765,8 +784,14 @@ def print_summary(
     print(
         results[
             "direction_5m"
-        ].value_counts().to_string()
+        ]
+        .value_counts()
+        .to_string()
     )
+
+    # --------------------------------------------------------
+    # SETUPS
+    # --------------------------------------------------------
 
     print(
         "\nSETUP DISTRIBUTION:"
@@ -775,8 +800,14 @@ def print_summary(
     print(
         results[
             "setup"
-        ].value_counts().to_string()
+        ]
+        .value_counts()
+        .to_string()
     )
+
+    # --------------------------------------------------------
+    # HTF
+    # --------------------------------------------------------
 
     print(
         "\nHTF DIRECTION:"
@@ -796,14 +827,20 @@ def print_summary(
         print(
             results[
                 timeframe
-            ].value_counts().to_string()
+            ]
+            .value_counts()
+            .to_string()
         )
+
+    # --------------------------------------------------------
+    # HTF PATTERNS
+    # --------------------------------------------------------
 
     print(
         "\nHTF PATTERNS:"
     )
 
-    pattern_counts = (
+    patterns = (
         results[
             [
                 "1d",
@@ -813,25 +850,38 @@ def print_summary(
             ]
         ]
         .value_counts()
-        .head(15)
+        .head(20)
     )
 
     print(
-        pattern_counts.to_string()
+        patterns.to_string()
     )
+
+    # --------------------------------------------------------
+    # KEY RESEARCH SETUPS
+    # --------------------------------------------------------
 
     print(
-        "\nTOP SETUPS:"
+        "\nKEY RESEARCH SETUPS:"
     )
 
-    setup_counts = (
-        results[
-            "setup"
-        ]
-        .value_counts()
-    )
+    for setup in [
+        "STRICT_BULLISH",
+        "STRICT_BEARISH",
+        "HTF_SWEEP_BULLISH",
+        "HTF_SWEEP_BEARISH",
+        "RETRACEMENT_BULLISH",
+        "RETRACEMENT_BEARISH",
+        "SWEEP_5M_BULLISH",
+        "SWEEP_5M_BEARISH",
+    ]:
 
-    for setup, count in setup_counts.items():
+        count = int(
+            (
+                results["setup"]
+                == setup
+            ).sum()
+        )
 
         print(
             f"  {setup:<25} {count}"
@@ -890,7 +940,7 @@ if __name__ == "__main__":
     )
 
     print(
-        f"Results saved:"
+        "Results saved:"
     )
 
     print(
