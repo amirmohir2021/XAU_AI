@@ -146,6 +146,70 @@ def get_signal_count():
     return result
 
 
+def save_signal(
+    signal_time: str,
+    direction: str,
+    entry: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    tp1: Optional[float] = None,
+    tp2: Optional[float] = None,
+    confirmations: Optional[int] = None,
+    alignment: Optional[float] = None,
+    market_phase: Optional[str] = None,
+    entry_trigger: Optional[str] = None,
+):
+    """
+    Save a BUY/SELL signal into the signals table.
+
+    Signals are initially stored as OPEN.
+    """
+
+    direction = direction.upper().strip()
+
+    if direction not in {"BUY", "SELL"}:
+        raise ValueError(
+            f"Invalid signal direction: {direction}. "
+            f"Only BUY or SELL can be saved."
+        )
+
+    conn = get_connection()
+
+    cursor = conn.execute("""
+        INSERT INTO signals (
+            signal_time,
+            direction,
+            entry,
+            stop_loss,
+            tp1,
+            tp2,
+            confirmations,
+            alignment,
+            market_phase,
+            entry_trigger,
+            result
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+    """, (
+        signal_time,
+        direction,
+        entry,
+        stop_loss,
+        tp1,
+        tp2,
+        confirmations,
+        alignment,
+        market_phase,
+        entry_trigger
+    ))
+
+    signal_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return signal_id
+
+
 if __name__ == "__main__":
     initialize_database()
 
