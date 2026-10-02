@@ -17,8 +17,7 @@ def load_5m_data():
     """
     Load latest 5M candles.
 
-    The currently forming candle is removed so that
-    strategy analysis only uses closed candles.
+    Only closed candles are used for analysis.
     """
 
     df = get_xauusd_candles(
@@ -29,8 +28,9 @@ def load_5m_data():
     if df is None or df.empty:
         raise RuntimeError("5M market data is empty.")
 
-    if "is_open" in df.columns:
-        df = df[df["is_open"] == 0].copy()
+    # The market_data.py format uses camelCase.
+    if "isOpen" in df.columns:
+        df = df[df["isOpen"] == False].copy()
 
     if len(df) < 220:
         raise RuntimeError(
@@ -198,9 +198,9 @@ def print_strategy_result(result):
 
 def save_signal_if_trade(result):
     """
-    Save only real BUY/SELL signals.
+    Save only BUY/SELL signals.
 
-    NO_TRADE and WAIT are never saved.
+    NO_TRADE is never saved.
     """
 
     print()
@@ -209,21 +209,17 @@ def save_signal_if_trade(result):
     print("-" * 100)
 
     if result.signal not in {"BUY", "SELL"}:
-
         print("SIGNAL SAVED      : NO")
         print(
             "Reason            : "
             "Strategy returned NO_TRADE."
         )
-
         return None
 
     signal_id = log_strategy_signal(result)
 
     if signal_id is None:
-
         print("SIGNAL SAVED      : NO")
-
         return None
 
     result.metadata["signal_id"] = signal_id
@@ -247,7 +243,7 @@ def collect_signal():
              ↓
         HTF context
              ↓
-        Liquidity Sweep
+        Liquidity Sweep strategy
              ↓
         Final BUY/SELL
              ↓
@@ -270,8 +266,10 @@ def collect_signal():
         f"{len(df_5m)}"
     )
 
-    latest_time = df_5m.iloc[-1]["open_time"]
-    latest_price = df_5m.iloc[-1]["close"]
+    latest_candle = df_5m.iloc[-1]
+
+    latest_time = latest_candle["openTime"]
+    latest_price = latest_candle["close"]
 
     print(
         f"Latest candle time : "
@@ -284,7 +282,7 @@ def collect_signal():
     )
 
     # ---------------------------------------------------------
-    # 2. HTF CONTEXT
+    # 2. BUILD HTF CONTEXT
     # ---------------------------------------------------------
 
     print()
@@ -295,7 +293,7 @@ def collect_signal():
     print_htf_context(htf_context)
 
     # ---------------------------------------------------------
-    # 3. STRATEGY
+    # 3. RUN STRATEGY
     # ---------------------------------------------------------
 
     print()
@@ -311,7 +309,7 @@ def collect_signal():
     print_strategy_result(result)
 
     # ---------------------------------------------------------
-    # 4. LOG SIGNAL
+    # 4. SAVE SIGNAL
     # ---------------------------------------------------------
 
     save_signal_if_trade(result)
