@@ -1,0 +1,892 @@
+﻿from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import pandas as pd
+
+
+# ============================================================
+# PROJECT ROOT
+# ============================================================
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+
+# ============================================================
+# IMPORTS
+# ============================================================
+
+from analysis.scalping_5m import analyze_5m
+from analysis.scalping_levels import generate_scalping_levels
+
+from memory.signal_logger import log_strategy_signal
+
+from strategies.base_strategy import (
+    BaseStrategy,
+    StrategyResult,
+)
+
+from strategies.htf_adapter import get_htf_context
+
+
+# ============================================================
+# LIQUIDITY SWEEP STRATEGY
+# ============================================================
+
+class LiquiditySweepStrategy(BaseStrategy):
+
+    strategy_id = "liquidity_sweep"
+    strategy_name = "Liquidity Sweep"
+    strategy_version = "1.1"
+
+    def __init__(self):
+        pass
+
+    # ========================================================
+    # MAIN ANALYSIS
+    # ========================================================
+
+    def analyze(
+        self,
+        df_5m: pd.DataFrame,
+        htf_context=None,
+    ) -> StrategyResult:
+
+        result = StrategyResult(
+            strategy_id=self.strategy_id,
+            strategy_name=self.strategy_name,
+            strategy_version=self.strategy_version,
+            analysis_time=datetime.now(
+                timezone.utc
+            ).isoformat(),
+        )
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        if df_5m is None or df_5m.empty:
+
+            result.status = "ERROR"
+            result.signal = "NO_TRADE"
+
+            result.add_reason(
+                "5M market data is empty."
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # 5M ANALYSIS
+        # ----------------------------------------------------
+
+        try:
+
+            analysis = analyze_5m(df_5m)
+
+        except Exception as exc:
+
+            result.status = "ERROR"
+            result.signal = "NO_TRADE"
+
+            result.add_reason(
+                f"5M analysis error: {exc}"
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # BASIC DATA
+        # ----------------------------------------------------
+
+        result.price = analysis.get("price")
+
+        result.trend_5m = analysis.get(
+            "direction",
+            "NEUTRAL"
+        )
+
+        # ----------------------------------------------------
+        # INDICATORS
+        # ----------------------------------------------------
+
+        result.indicators = {
+            "ema_fast": analysis.get("ema_fast"),
+            "ema_middle": analysis.get("ema_middle"),
+            "ema_slow": analysis.get("ema_slow"),
+            "rsi": analysis.get("rsi"),
+            "atr": analysis.get("atr"),
+            "adx": analysis.get("adx"),
+            "macd": analysis.get("macd"),
+            "macd_signal": analysis.get("macd_signal"),
+            "macd_hist": analysis.get("macd_hist"),
+            "di_plus": analysis.get("di_plus"),
+            "di_minus": analysis.get("di_minus"),
+            "strength": analysis.get("strength"),
+        }
+
+        # ----------------------------------------------------
+        # STRUCTURE
+        # ----------------------------------------------------
+
+        result.structure = {
+            "structure": analysis.get("structure"),
+            "high_structure": analysis.get("high_structure"),
+            "low_structure": analysis.get("low_structure"),
+            "bos": analysis.get("bos"),
+        }
+
+        # ----------------------------------------------------
+        # LIQUIDITY
+        # ----------------------------------------------------
+
+        liquidity_sweep = analysis.get(
+            "liquidity_sweep"
+        )
+
+        result.liquidity = {
+            "liquidity_sweep": liquidity_sweep,
+            "setup": analysis.get("setup"),
+        }
+
+        # ----------------------------------------------------
+        # NO LIQUIDITY SWEEP
+        # ----------------------------------------------------
+
+        if liquidity_sweep in (
+            None,
+            "",
+            "NONE",
+            "NO_SWEEP",
+        ):
+
+            result.setup = "NO_LIQUIDITY_SWEEP"
+
+            result.signal = "NO_TRADE"
+            result.status = "NO_TRADE"
+
+            result.add_reason(
+                "No confirmed liquidity sweep detected."
+            )
+
+            self._apply_htf_context(
+                result,
+                htf_context,
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # SETUP
+        # ----------------------------------------------------
+
+        result.setup = liquidity_sweep
+
+        # ----------------------------------------------------
+        # 5M INDICATOR CONFIRMATION
+        # ----------------------------------------------------
+
+        direction_5m = analysis.get(
+            "direction",
+            "NEUTRAL"
+        )
+
+        if direction_5m == "BULLISH":
+
+            result.add_confirmation(
+                "5M_BULLISH"
+            )
+
+            result.add_reason(
+                "5M indicators confirm bullish direction."
+            )
+
+        elif direction_5m == "BEARISH":
+
+            result.add_confirmation(
+                "5M_BEARISH"
+            )
+
+            result.add_reason(
+                "5M indicators confirm bearish direction."
+            )
+
+        # ----------------------------------------------------
+        # STRUCTURE CONFIRMATION
+        # ----------------------------------------------------
+
+        structure_direction = analysis.get(
+            "structure"
+        )
+
+        if structure_direction:
+
+            result.add_confirmation(
+                f"STRUCTURE_{structure_direction}"
+            )
+
+            result.add_reason(
+                f"5M structure: {structure_direction}"
+            )
+
+        # ----------------------------------------------------
+        # HTF CONTEXT
+        # ----------------------------------------------------
+
+        self._apply_htf_context(
+            result,
+            htf_context,
+        )
+
+        # ----------------------------------------------------
+        # FINAL SIGNAL
+        # ----------------------------------------------------
+
+        final_signal = self._determine_final_signal(
+            result,
+            analysis,
+            liquidity_sweep,
+        )
+
+        result.signal = final_signal
+
+        # ----------------------------------------------------
+        # TRADE LEVELS
+        # ----------------------------------------------------
+
+        if final_signal in (
+            "BUY",
+            "SELL",
+        ):
+
+            try:
+
+                levels = generate_scalping_levels(
+                    df_5m,
+                    analysis,
+                )
+
+                if levels:
+
+                    result.entry = levels.get(
+                        "entry"
+                    )
+
+                    result.stop_loss = levels.get(
+                        "stop_loss"
+                    )
+
+                    result.tp1 = levels.get(
+                        "tp1"
+                    )
+
+                    result.tp2 = levels.get(
+                        "tp2"
+                    )
+
+                    result.risk = levels.get(
+                        "risk"
+                    )
+
+                    result.rr_tp1 = levels.get(
+                        "rr_tp1"
+                    )
+
+                    result.rr_tp2 = levels.get(
+                        "rr_tp2"
+                    )
+
+                    result.metadata.update({
+
+                        "sl_method": levels.get(
+                            "sl_method"
+                        ),
+
+                        "liquidity_sweep": levels.get(
+                            "liquidity_sweep"
+                        ),
+
+                        "candle_time": levels.get(
+                            "candle_time"
+                        ),
+
+                    })
+
+                    result.status = "READY"
+
+                else:
+
+                    result.signal = "NO_TRADE"
+                    result.status = "NO_TRADE"
+
+                    result.add_reason(
+                        "Could not generate trade levels."
+                    )
+
+            except Exception as exc:
+
+                result.signal = "NO_TRADE"
+                result.status = "ERROR"
+
+                result.add_reason(
+                    f"Level generation error: {exc}"
+                )
+
+        else:
+
+            result.status = "NO_TRADE"
+
+        # ----------------------------------------------------
+        # FINAL REASONS
+        # ----------------------------------------------------
+
+        if result.signal == "BUY":
+
+            result.add_reason(
+                "Final BUY confirmed by "
+                "5M liquidity sweep + HTF V3.1 alignment."
+            )
+
+        elif result.signal == "SELL":
+
+            result.add_reason(
+                "Final SELL confirmed by "
+                "5M liquidity sweep + HTF V3.1 alignment."
+            )
+
+        # ====================================================
+        # SIGNAL HISTORY
+        # ====================================================
+
+        # Faqat haqiqiy BUY/SELL DB ga yoziladi.
+        # NO_TRADE yozilmaydi.
+
+        if result.signal in (
+            "BUY",
+            "SELL",
+        ):
+
+            try:
+
+                signal_id = log_strategy_signal(
+                    result
+                )
+
+                if signal_id is not None:
+
+                    result.metadata[
+                        "signal_id"
+                    ] = signal_id
+
+            except Exception as exc:
+
+                result.add_reason(
+                    f"Signal history logging error: {exc}"
+                )
+
+        return result
+
+    # ========================================================
+    # FINAL SIGNAL LOGIC
+    # ========================================================
+
+    def _determine_final_signal(
+        self,
+        result: StrategyResult,
+        analysis: dict,
+        liquidity_sweep: str,
+    ) -> str:
+
+        # ----------------------------------------------------
+        # V3.1 SIGNAL
+        # ----------------------------------------------------
+
+        v31_signal = result.metadata.get(
+            "v31_signal",
+            "WAIT"
+        )
+
+        if v31_signal not in (
+            "BUY",
+            "SELL",
+        ):
+
+            result.add_reason(
+                "V3.1 HTF engine is currently WAIT."
+            )
+
+            return "NO_TRADE"
+
+        # ----------------------------------------------------
+        # 5M DIRECTION
+        # ----------------------------------------------------
+
+        direction_5m = analysis.get(
+            "direction",
+            "NEUTRAL"
+        )
+
+        # ----------------------------------------------------
+        # BULLISH SWEEP
+        # ----------------------------------------------------
+
+        if liquidity_sweep == "BULLISH_SWEEP":
+
+            if v31_signal != "BUY":
+
+                result.add_reason(
+                    "Bullish liquidity sweep conflicts "
+                    "with V3.1 direction."
+                )
+
+                return "NO_TRADE"
+
+            if direction_5m != "BULLISH":
+
+                result.add_reason(
+                    "Bullish liquidity sweep lacks "
+                    "5M bullish confirmation."
+                )
+
+                return "NO_TRADE"
+
+            result.add_confirmation(
+                "BULLISH_LIQUIDITY_SWEEP"
+            )
+
+            result.add_reason(
+                "Bullish liquidity sweep confirmed."
+            )
+
+            return "BUY"
+
+        # ----------------------------------------------------
+        # BEARISH SWEEP
+        # ----------------------------------------------------
+
+        if liquidity_sweep == "BEARISH_SWEEP":
+
+            if v31_signal != "SELL":
+
+                result.add_reason(
+                    "Bearish liquidity sweep conflicts "
+                    "with V3.1 direction."
+                )
+
+                return "NO_TRADE"
+
+            if direction_5m != "BEARISH":
+
+                result.add_reason(
+                    "Bearish liquidity sweep lacks "
+                    "5M bearish confirmation."
+                )
+
+                return "NO_TRADE"
+
+            result.add_confirmation(
+                "BEARISH_LIQUIDITY_SWEEP"
+            )
+
+            result.add_reason(
+                "Bearish liquidity sweep confirmed."
+            )
+
+            return "SELL"
+
+        # ----------------------------------------------------
+        # UNKNOWN
+        # ----------------------------------------------------
+
+        result.add_reason(
+            f"Unsupported liquidity sweep: "
+            f"{liquidity_sweep}"
+        )
+
+        return "NO_TRADE"
+
+    # ========================================================
+    # HTF CONTEXT
+    # ========================================================
+
+    def _apply_htf_context(
+        self,
+        result: StrategyResult,
+        htf_context,
+    ):
+
+        if htf_context is None:
+
+            try:
+
+                htf_context = get_htf_context()
+
+            except Exception as exc:
+
+                result.add_reason(
+                    f"HTF context error: {exc}"
+                )
+
+                return
+
+        if not htf_context:
+
+            result.add_reason(
+                "HTF context unavailable."
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # TRENDS
+        # ----------------------------------------------------
+
+        result.trend_1d = htf_context.get(
+            "1d",
+            htf_context.get(
+                "major_direction",
+                "NEUTRAL"
+            )
+        )
+
+        result.trend_4h = htf_context.get(
+            "4h",
+            htf_context.get(
+                "structure_direction",
+                "NEUTRAL"
+            )
+        )
+
+        result.trend_1h = htf_context.get(
+            "1h",
+            htf_context.get(
+                "h1_direction",
+                "NEUTRAL"
+            )
+        )
+
+        result.trend_15m = htf_context.get(
+            "15m",
+            htf_context.get(
+                "m15_direction",
+                "NEUTRAL"
+            )
+        )
+
+        # ----------------------------------------------------
+        # HTF AGREEMENT
+        # ----------------------------------------------------
+
+        result.htf_agreement = htf_context.get(
+            "htf_agreement",
+            "MIXED"
+        )
+
+        # ----------------------------------------------------
+        # V3.1 METADATA
+        # ----------------------------------------------------
+
+        result.metadata.update({
+
+            "v31_signal": htf_context.get(
+                "signal",
+                "WAIT"
+            ),
+
+            "v31_confidence": htf_context.get(
+                "confidence"
+            ),
+
+            "v31_confirmations": htf_context.get(
+                "confirmations"
+            ),
+
+            "v31_market_phase": htf_context.get(
+                "market_phase"
+            ),
+
+            "v31_entry_trigger": htf_context.get(
+                "entry_trigger"
+            ),
+
+            "v31_support": htf_context.get(
+                "support"
+            ),
+
+            "v31_resistance": htf_context.get(
+                "resistance"
+            ),
+
+            "v31_recent_bos": htf_context.get(
+                "recent_bos"
+            ),
+
+            "v31_recent_choch": htf_context.get(
+                "recent_choch"
+            ),
+
+            "v31_reasons": htf_context.get(
+                "reasons",
+                []
+            ),
+        })
+
+        # ----------------------------------------------------
+        # V3.1 LEVELS
+        # ----------------------------------------------------
+
+        result.metadata["v31_entry"] = htf_context.get(
+            "entry"
+        )
+
+        result.metadata["v31_stop_loss"] = htf_context.get(
+            "stop_loss"
+        )
+
+        result.metadata["v31_tp1"] = htf_context.get(
+            "tp1"
+        )
+
+        result.metadata["v31_tp2"] = htf_context.get(
+            "tp2"
+        )
+
+        result.metadata["v31_risk"] = htf_context.get(
+            "risk"
+        )
+
+        # ----------------------------------------------------
+        # V3.1 CONFIRMATION
+        # ----------------------------------------------------
+
+        v31_signal = htf_context.get(
+            "signal",
+            "WAIT"
+        )
+
+        if v31_signal in (
+            "BUY",
+            "SELL",
+        ):
+
+            result.add_confirmation(
+                f"V31_{v31_signal}"
+            )
+
+            result.add_reason(
+                f"V3.1 HTF signal: {v31_signal}"
+            )
+
+        else:
+
+            result.add_reason(
+                "V3.1 HTF engine is currently WAIT."
+            )
+
+
+# ============================================================
+# DIRECT TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    from data.market_data import get_xauusd_candles
+
+    print("=" * 70)
+    print("XAU_AI LIQUIDITY SWEEP + V3.1 TEST")
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # LOAD 5M
+    # --------------------------------------------------------
+
+    try:
+
+        df_5m = get_xauusd_candles(
+            "5m",
+            limit=300,
+        )
+
+    except Exception as exc:
+
+        print(
+            f"5M data loading error: {exc}"
+        )
+
+        sys.exit(1)
+
+    print(
+        f"Loaded candles: {len(df_5m)}"
+    )
+
+    # --------------------------------------------------------
+    # LOAD HTF
+    # --------------------------------------------------------
+
+    try:
+
+        htf_context = get_htf_context()
+
+    except Exception as exc:
+
+        print(
+            f"HTF context error: {exc}"
+        )
+
+        htf_context = None
+
+    # --------------------------------------------------------
+    # STRATEGY
+    # --------------------------------------------------------
+
+    strategy = LiquiditySweepStrategy()
+
+    result = strategy.analyze(
+        df_5m=df_5m,
+        htf_context=htf_context,
+    )
+
+    # --------------------------------------------------------
+    # OUTPUT
+    # --------------------------------------------------------
+
+    print()
+
+    print(
+        f"V3.1 SIGNAL: "
+        f"{result.metadata.get('v31_signal', 'N/A')}"
+    )
+
+    print(
+        f"V3.1 CONFIRMATIONS: "
+        f"{result.metadata.get('v31_confirmations', 'N/A')}"
+    )
+
+    print(
+        f"V3.1 CONFIDENCE: "
+        f"{result.metadata.get('v31_confidence', 'N/A')}"
+    )
+
+    print(
+        f"HTF AGREEMENT: "
+        f"{result.htf_agreement}"
+    )
+
+    print(
+        f"1D: {result.trend_1d}"
+    )
+
+    print(
+        f"4H: {result.trend_4h}"
+    )
+
+    print(
+        f"1H: {result.trend_1h}"
+    )
+
+    print(
+        f"15M: {result.trend_15m}"
+    )
+
+    print()
+
+    print(
+        f"STRATEGY: {result.strategy_name}"
+    )
+
+    print(
+        f"VERSION: {result.strategy_version}"
+    )
+
+    print(
+        f"SIGNAL: {result.signal}"
+    )
+
+    print(
+        f"STATUS: {result.status}"
+    )
+
+    print(
+        f"PRICE: {result.price}"
+    )
+
+    print(
+        f"SETUP: {result.setup}"
+    )
+
+    print(
+        f"5M TREND: {result.trend_5m}"
+    )
+
+    print(
+        f"CONFIRMATIONS: "
+        f"{result.confirmation_count}"
+    )
+
+    print()
+
+    # --------------------------------------------------------
+    # LEVELS
+    # --------------------------------------------------------
+
+    if result.entry is not None:
+
+        print(
+            f"ENTRY: {result.entry}"
+        )
+
+        print(
+            f"STOP LOSS: {result.stop_loss}"
+        )
+
+        print(
+            f"TP1: {result.tp1}"
+        )
+
+        print(
+            f"TP2: {result.tp2}"
+        )
+
+        print(
+            f"RISK: {result.risk}"
+        )
+
+        print(
+            f"RR TP1: {result.rr_tp1}"
+        )
+
+        print(
+            f"RR TP2: {result.rr_tp2}"
+        )
+
+    # --------------------------------------------------------
+    # SIGNAL ID
+    # --------------------------------------------------------
+
+    if "signal_id" in result.metadata:
+
+        print()
+
+        print(
+            f"SIGNAL ID: "
+            f"{result.metadata['signal_id']}"
+        )
+
+    # --------------------------------------------------------
+    # REASONS
+    # --------------------------------------------------------
+
+    print()
+
+    print("REASONS:")
+
+    for reason in result.reasons:
+
+        print(
+            f" - {reason}"
+        )
+
+    print("=" * 70)
